@@ -10,8 +10,9 @@ resource "azurerm_postgresql_flexible_server" "this" {
   storage_mb = each.value.storage_mb
   version    = each.value.version
 
-  administrator_login    = each.value.administrator_login
-  administrator_password = each.value.administrator_password
+  # Only set admin credentials if password authentication is enabled
+  administrator_login    = each.value.authentication.password_auth_enabled ? each.value.administrator_login : null
+  administrator_password = each.value.authentication.password_auth_enabled ? each.value.administrator_password : null
 
   # Azure AD authentication
   authentication {
