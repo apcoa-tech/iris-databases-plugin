@@ -19,8 +19,8 @@ locals {
 
       # Server configuration
       sku_name   = "B_Standard_B1ms" # Basic tier, 1 vCore, 2 GiB RAM - good for dev
-      storage_mb = 32768              # 32 GB storage
-      version    = "16"               # PostgreSQL version
+      storage_mb = 32768             # 32 GB storage
+      version    = "16"              # PostgreSQL version
 
       # High availability
       high_availability = {
