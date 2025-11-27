@@ -1,0 +1,151 @@
+name: Terraform Dev
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'dev/**'
+      - '.github/workflows/terraform-dev.yml'
+
+  push:
+    branches: [main]
+    paths:
+      - 'dev/**'
+      - '.github/workflows/terraform-dev.yml'
+
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: terraform-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  TF_VERSION: "1.9.0"
+  WORKING_DIR: ./dev
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  ARM_USE_OIDC: true
+  TF_VAR_subscription_id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  terraform:
+    name: Terraform
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' && 'dev' || '' }}
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Format
+        id: fmt
+        run: terraform fmt -check -recursive
+        continue-on-error: true
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Terraform Init
+        id: init
+        run: terraform init
+
+      - name: Trivy Security Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: ${{ env.WORKING_DIR }}
+          exit-code: '1'
+          severity: 'HIGH,CRITICAL'
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -var-file=terraform.tfvars -no-color -out=tfplan -detailed-exitcode
+        continue-on-error: true
+
+      - name: Plan Status
+        if: steps.plan.outputs.exitcode == '1'
+        run: exit 1
+
+      - name: Comment PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          PLAN: "${{ steps.plan.outputs.stdout }}"
+        with:
+          script: |
+            const hasChanges = '${{ steps.plan.outputs.exitcode }}' === '2';
+            const statusEmoji = {
+              success: '✅',
+              failure: '❌',
+            };
+            const output = `### Terraform Plan Results
+
+            | Step | Status |
+            |------|--------|
+            | Format | ${statusEmoji['${{ steps.fmt.outcome }}']} \`${{ steps.fmt.outcome }}\` |
+            | Security Scan | ${statusEmoji['success']} \`passed\` |
+            | Init | ${statusEmoji['${{ steps.init.outcome }}']} \`${{ steps.init.outcome }}\` |
+            | Validate | ${statusEmoji['${{ steps.validate.outcome }}']} \`${{ steps.validate.outcome }}\` |
+            | Plan | ${statusEmoji['${{ steps.plan.outcome }}']} \`${{ steps.plan.outcome }}\` |
+
+            **Changes detected:** ${hasChanges ? 'Yes' : 'No'}
+
+            <details><summary>Plan Output</summary>
+
+            \`\`\`hcl
+            ${process.env.PLAN}
+            \`\`\`
+
+            </details>
+
+            *Triggered by @${{ github.actor }} via ${{ github.event_name }}*`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Terraform Apply
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.plan.outputs.exitcode == '2'
+        run: terraform apply -auto-approve tfplan
+
+      - name: Summary
+        run: |
+          if [[ "${{ steps.plan.outputs.exitcode }}" == "0" ]]; then
+            echo "## No Infrastructure Changes" >> $GITHUB_STEP_SUMMARY
+            echo "Terraform detected no changes." >> $GITHUB_STEP_SUMMARY
+          elif [[ "${{ steps.plan.outputs.exitcode }}" == "2" && "${{ github.ref }}" == "refs/heads/main" && "${{ github.event_name }}" == "push" ]]; then
+            echo "## Deployment Successful" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Outputs" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            terraform output -no-color >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## Plan Complete" >> $GITHUB_STEP_SUMMARY
+            echo "Changes detected. Will apply on merge to main." >> $GITHUB_STEP_SUMMARY
+          fi
